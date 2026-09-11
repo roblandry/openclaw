@@ -3,6 +3,35 @@ import OpenClawKit
 import WebKit
 
 extension DashboardManager {
+    struct AuxiliaryWindowInstance {
+        var target: DashboardGatewayTarget
+        var controller: DashboardWindowController
+    }
+
+    struct WindowConfiguration {
+        let url: URL
+        let auth: DashboardWindowAuth
+        let tlsParams: GatewayTLSParams?
+        let mode: AppState.ConnectionMode
+        let displayName: String
+        var browserSession: GatewayBrowserSession?
+    }
+
+    struct SupersededDashboardPresentation: Error {}
+
+    struct NavigationIntent {
+        let id = UUID()
+        let windowID: ObjectIdentifier?
+    }
+
+    final class ProfileObservation {
+        let id = UUID()
+        var task: Task<Void, Never>?
+        var snapshot: GatewayConnection.PushDelivery?
+        var revision: UInt64 = 0
+        var needsRefresh = false
+    }
+
     static let shared: DashboardManager = {
         #if DEBUG
         // UI fixtures instantiate shared views; their notifications must not start
