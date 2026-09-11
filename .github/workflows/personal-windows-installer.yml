@@ -1,0 +1,98 @@
+name: Personal Windows Installer
+
+run-name: Windows installer ${{ inputs.tag }} [${{ inputs.request_id }}]
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact upstream OpenClaw release tag
+        required: true
+        type: string
+      request_id:
+        description: Unique identifier used by the local download script
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]{4}\.[1-9][0-9]*\.[1-9][0-9]*(-[1-9][0-9]*)?$ ]]
+          [[ "$REQUEST_ID" =~ ^[A-Za-z0-9._-]+$ ]]
+
+      - name: Checkout exact upstream tag
+        uses: actions/checkout@v4
+        with:
+          repository: openclaw/openclaw
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile --prefer-offline \
+            --config.ignore-scripts=false \
+            --config.engine-strict=false \
+            --config.enable-pre-post-scripts=true \
+            --config.side-effects-cache=true
+
+      - name: Build NSIS installer
+        working-directory: apps/linux/src-tauri
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          pnpm dlx @tauri-apps/cli@2.11.4 build --bundles nsis \
+            --config "{\"version\":\"${version}\",\"bundle\":{\"createUpdaterArtifacts\":false}}"
+
+      - name: Stage and verify installer
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:RELEASE_TAG.Substring(1)
+          $installers = @(Get-ChildItem "apps/linux/src-tauri/target/release/bundle/nsis/*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected one NSIS installer; found $($installers.Count)"
+          }
+          if (-not $installers[0].VersionInfo.ProductVersion.StartsWith($version)) {
+            throw "Installer version '$($installers[0].VersionInfo.ProductVersion)' does not match '$version'"
+          }
+          New-Item -ItemType Directory -Force -Path "dist/windows-app/release" | Out-Null
+          $target = "dist/windows-app/release/OpenClaw-$version-windows-x86_64.exe"
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $target
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+          "$hash  OpenClaw-$version-windows-x86_64.exe" | Set-Content -Encoding ascii "dist/windows-app/release/SHA256SUMS.windows-app.txt"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-windows-${{ inputs.tag }}-${{ inputs.request_id }}
+          path: dist/windows-app/release/*
+          if-no-files-found: error
+          retention-days: 14
