@@ -599,7 +599,7 @@ const BROAD_CHANGED_FALLBACK_PATTERNS = [
 ];
 const PRECISE_SOURCE_TEST_TARGETS = new Map<string, string[]>([
   [
-    "patches/vitest@5.0.0.patch",
+    "patches/vitest@5.0.1.patch",
     [
       "test/scripts/run-vitest-profile.test.ts",
       "test/scripts/run-vitest-state-cleanup.test.ts",
@@ -2400,6 +2400,7 @@ const EXACT_TOOLING_TARGETS = new Map<string, string[]>([
   ["scripts/release-verify-beta.ts", ["release-wrapper-scripts"]],
   ["scripts/lib/bundled-plugin-build-entries.mjs", ["bundled-plugin-build-entries", releaseCheck]],
   ["scripts/lib/docker-e2e-package.sh", [dockerBuild]],
+  ["scripts/relay-build-limit-warnings.mts", [dockerBuild]],
   [
     "scripts/lib/release-version.mjs",
     [
