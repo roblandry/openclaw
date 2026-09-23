@@ -1,5 +1,8 @@
 import type { CreateGhosttyTerminalOptions } from "@openclaw/libterminal/browser";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { installTerminalAndroidImeFix } from "./terminal-android-ime.ts";
+import { installTerminalAndroidTouchFix } from "./terminal-android-touch.ts";
+import { installTerminalKeyboardReserve } from "./terminal-keyboard-reserve.ts";
 
 function isEventListener(value: unknown): value is EventListener {
   return typeof value === "function";
@@ -7,6 +10,16 @@ function isEventListener(value: unknown): value is EventListener {
 
 /** Creates a terminal whose WASM memory is never reused by another tab. */
 export async function createIsolatedGhosttyTerminal(options: CreateGhosttyTerminalOptions) {
+  // Android soft-keyboard workarounds for ghostty-web 0.4.0: IME text
+  // delivery, touch gesture translation (tap-to-focus, drag-select,
+  // link-tap, paste-menu dismissal), and keyboard-space viewport reserve.
+  // Each installs document-level listeners exactly once per page, so
+  // calling all three from every terminal instance's setup path is safe.
+  // See terminal-android-ime.ts / terminal-android-touch.ts /
+  // terminal-keyboard-reserve.ts for the ported shim behavior.
+  installTerminalAndroidImeFix();
+  installTerminalAndroidTouchFix();
+  installTerminalKeyboardReserve();
   const [{ createGhosttyTerminal, loadGhosttyRuntime }, ghosttyModule] = await Promise.all([
     import("@openclaw/libterminal/browser"),
     import("ghostty-web"),
