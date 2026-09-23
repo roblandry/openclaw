@@ -238,4 +238,106 @@ describe("installTerminalAndroidTouchFix", () => {
 
     expect(clicks).toEqual([]);
   });
+
+  it("exact 10px tolerance boundary: dy=10 from start does not count as moved", () => {
+    const { canvas, container } = buildGhosttyHost();
+    installTerminalAndroidTouchFix();
+    const wheels: WheelEvent[] = [];
+    container.addEventListener("wheel", (e) => wheels.push(e as WheelEvent));
+
+    const t0 = makeTouch({ clientX: 100, clientY: 100, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchstart", canvas, [t0]));
+    const atTolerance = makeTouch({ clientX: 100, clientY: 110, target: canvas }); // dy===10
+    canvas.dispatchEvent(touchEvent("touchmove", canvas, [atTolerance]));
+    expect(wheels).toEqual([]); // exactly at tolerance: NOT "moved" (code checks `>`, not `>=`)
+
+    // A further move whose delta since the LAST position (not since start)
+    // is large enough to clear one wheel quantum proves scrolling engaged.
+    const overTolerance = makeTouch({ clientX: 100, clientY: 200, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchmove", canvas, [overTolerance]));
+    expect(wheels.length).toBeGreaterThan(0);
+  });
+
+  it("wheel quantization: a single large move flushes multiple ±5-step quanta in one pass, bounded by the 8-iteration guard", () => {
+    const { canvas, container } = buildGhosttyHost();
+    installTerminalAndroidTouchFix();
+    const wheelDeltas: number[] = [];
+    container.addEventListener("wheel", (e) => wheelDeltas.push((e as WheelEvent).deltaY));
+
+    const t0 = makeTouch({ clientX: 100, clientY: 100, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchstart", canvas, [t0]));
+    // A single 500px drag: flushScroll loops within ONE touchmove call until
+    // the residual drops below a whole quantum. residual=500 -> round(500/33)=15,
+    // capped to 5 -> emit -165, residual=335 -> round(335/33)=10, capped to 5
+    // -> emit -165, residual=170 -> round(170/33)=5, capped to 5 -> emit -165,
+    // residual=5 -> round(5/33)=0 -> stop. Three emitted events, not one:
+    // the cap limits each EVENT's magnitude, not the total flushed per move.
+    const t1 = makeTouch({ clientX: 100, clientY: 600, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchmove", canvas, [t1]));
+
+    expect(wheelDeltas).toEqual([-165, -165, -165]);
+  });
+
+  it("small sub-quantum drags accumulate residual across moves instead of being dropped", () => {
+    const { canvas, container } = buildGhosttyHost();
+    installTerminalAndroidTouchFix();
+    const wheelDeltas: number[] = [];
+    container.addEventListener("wheel", (e) => wheelDeltas.push((e as WheelEvent).deltaY));
+
+    const t0 = makeTouch({ clientX: 100, clientY: 100, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchstart", canvas, [t0]));
+    // First move clears the 10px tolerance and contributes 12px (residual 12, round(12/33)=0: no wheel yet).
+    const t1 = makeTouch({ clientX: 100, clientY: 112, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchmove", canvas, [t1]));
+    expect(wheelDeltas).toEqual([]);
+    // A further 12px (residual 24, round(24/33)=1 -> one wheel event).
+    const t2 = makeTouch({ clientX: 100, clientY: 124, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchmove", canvas, [t2]));
+    expect(wheelDeltas).toEqual([-33]);
+  });
+
+  it("non-cancelable touchmove is not rejected (Chrome intervention guard)", () => {
+    const { canvas } = buildGhosttyHost();
+    installTerminalAndroidTouchFix();
+
+    const t0 = makeTouch({ clientX: 100, clientY: 100, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchstart", canvas, [t0]));
+    const t1 = makeTouch({ clientX: 100, clientY: 150, target: canvas });
+    const event = touchEvent("touchmove", canvas, [t1], { cancelable: false });
+    expect(() => canvas.dispatchEvent(event)).not.toThrow();
+  });
+
+  it("a stale long-press timer from a discarded gesture does not arm the next gesture", () => {
+    const { canvas } = buildGhosttyHost();
+    installTerminalAndroidTouchFix();
+    const mouseEvents: string[] = [];
+    canvas.addEventListener("mousedown", () => mouseEvents.push("mousedown"));
+
+    // First touch arms a long-press timer, then is abandoned (touchcancel)
+    // WITHOUT the timer having fired yet.
+    const tA = makeTouch({ identifier: 1, clientX: 10, clientY: 10, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchstart", canvas, [tA]));
+    canvas.dispatchEvent(touchEvent("touchcancel", canvas, []));
+
+    // A second, brand-new touch starts and moves before 500ms elapses.
+    const tB0 = makeTouch({ identifier: 2, clientX: 200, clientY: 200, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchstart", canvas, [tB0]));
+    const tB1 = makeTouch({ identifier: 2, clientX: 220, clientY: 220, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchmove", canvas, [tB1]));
+
+    // If the stale timer from touch A fired and armed gesture B as
+    // longPressed by identity confusion, this move would have started a
+    // mouse-based selection instead of a scroll.
+    vi.advanceTimersByTime(500);
+    const tB2 = makeTouch({ identifier: 2, clientX: 240, clientY: 240, target: canvas });
+    canvas.dispatchEvent(touchEvent("touchmove", canvas, [tB2]));
+    expect(mouseEvents).toEqual([]);
+  });
+
+  it("uses the same window flag name as the shipped shim, so a coexisting legacy copy would defer to it", () => {
+    buildGhosttyHost();
+    installTerminalAndroidTouchFix();
+    // oxlint-disable-next-line no-underscore-dangle -- asserting the shipped shim's literal flag name, not a naming choice here
+    expect((window as unknown as Record<string, unknown>).__openclawTerminalTouchFixV6).toBe(true);
+  });
 });

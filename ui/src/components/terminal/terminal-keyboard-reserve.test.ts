@@ -74,6 +74,14 @@ describe("installTerminalKeyboardReserve", () => {
 
   afterEach(() => {
     document.body.innerHTML = "";
+    // These tests mutate the real global navigator/window; this repo's
+    // vitest pool runs with isolate:false, so an un-reset stub here would
+    // leak into whichever unrelated test file's jsdom environment happens
+    // to run next in the same worker (including files that call
+    // createIsolatedGhosttyTerminal and would otherwise unexpectedly get a
+    // "coarse pointer" environment).
+    Object.defineProperty(navigator, "maxTouchPoints", { value: 0, configurable: true });
+    delete (window as unknown as Record<string, unknown>).matchMedia;
     resetTerminalKeyboardReserveForTests();
   });
 
@@ -204,7 +212,7 @@ describe("installTerminalKeyboardReserve", () => {
   it("is idempotent: installing twice does not double-register listeners", async () => {
     setCoarsePointer(true);
     const { container } = buildGhosttyContainer();
-    stubVisualViewport(363, 0, 1);
+    const vv = stubVisualViewport(363, 0, 1);
     Object.defineProperty(window, "innerHeight", { value: 676, configurable: true });
 
     installTerminalKeyboardReserve();
@@ -212,5 +220,59 @@ describe("installTerminalKeyboardReserve", () => {
     await flushRaf();
 
     expect(container.style.paddingBottom).toBe("313px");
+
+    // Prove there is really only ONE listener, not just an identical
+    // resulting value: spy on how many times style.paddingBottom is WRITTEN
+    // in response to a single resize event. A second registration would
+    // apply() twice (each call is idempotent in VALUE but not in write
+    // count), which a value-only assertion like the one above cannot
+    // distinguish from a correctly-deduped single install.
+    let writes = 0;
+    const original = Object.getOwnPropertyDescriptor(
+      CSSStyleDeclaration.prototype,
+      "paddingBottom",
+    );
+    Object.defineProperty(container.style, "paddingBottom", {
+      configurable: true,
+      get() {
+        return original?.get?.call(this) ?? "";
+      },
+      set(value: string) {
+        writes += 1;
+        original?.set?.call(this, value);
+      },
+    });
+    vv.height = 400; // change the inset so apply() actually writes again
+    vv.trigger("resize");
+    await flushRaf();
+    expect(writes).toBe(1);
+  });
+
+  it("uses the same window flag name as the shipped shim, so a coexisting legacy copy would defer to it", () => {
+    setCoarsePointer(true);
+    buildGhosttyContainer();
+    installTerminalKeyboardReserve();
+    // oxlint-disable-next-line no-underscore-dangle -- asserting the shipped shim's literal flag name, not a naming choice here
+    expect((window as unknown as Record<string, unknown>).__openclawTerminalReserveV1).toBe(true);
+  });
+
+  it("direct-parent-textarea guard: a textarea nested under an extra wrapper is not treated as a container", async () => {
+    setCoarsePointer(true);
+    stubVisualViewport(363, 0, 1);
+    Object.defineProperty(window, "innerHeight", { value: 676, configurable: true });
+
+    const container = document.createElement("div");
+    const canvas = document.createElement("canvas");
+    const wrapper = document.createElement("div");
+    const textarea = document.createElement("textarea");
+    wrapper.appendChild(textarea); // textarea's parentElement is wrapper, not container
+    container.appendChild(canvas);
+    container.appendChild(wrapper);
+    document.body.appendChild(container);
+
+    installTerminalKeyboardReserve();
+    await flushRaf();
+
+    expect(container.style.paddingBottom).toBe("");
   });
 });

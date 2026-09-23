@@ -25,8 +25,9 @@
  */
 
 import { isCoarsePointerDevice } from "./terminal-coarse-pointer.ts";
+import { claimInstallFlag, releaseInstallFlagForTests } from "./terminal-shim-install-guard.ts";
 
-let installed = false;
+const INSTALL_FLAG = "__openclawTerminalImeShimV4";
 let installAbort: AbortController | null = null;
 
 /**
@@ -34,10 +35,13 @@ let installAbort: AbortController | null = null;
  * safe to call from every terminal instance's setup path.
  */
 export function installTerminalAndroidImeFix(): void {
-  if (installed) {
+  // Matches the shipped shim: the flag is claimed BEFORE the touch gate, so
+  // a non-touch device still permanently consumes the once-only install
+  // (see terminal-key-row.ts for the one shim that does this the other way
+  // around).
+  if (!claimInstallFlag(INSTALL_FLAG)) {
     return;
   }
-  installed = true;
 
   // [P1] Scope strictly to the broken path. On desktop, ghostty's keydown
   // route already works and a native compositionend still fires, so
@@ -170,5 +174,5 @@ export function installTerminalAndroidImeFix(): void {
 export function resetTerminalAndroidImeFixForTests(): void {
   installAbort?.abort();
   installAbort = null;
-  installed = false;
+  releaseInstallFlagForTests(INSTALL_FLAG);
 }

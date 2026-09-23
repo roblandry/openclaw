@@ -15,6 +15,7 @@
  */
 
 import { isCoarsePointerDevice } from "./terminal-coarse-pointer.ts";
+import { claimInstallFlag, releaseInstallFlagForTests } from "./terminal-shim-install-guard.ts";
 
 const KEY_ROW_TAG = "openclaw-terminal-key-row";
 
@@ -99,7 +100,7 @@ function keyRowHeight(): number {
   return r.height > 0 ? Math.round(r.height) : 0;
 }
 
-let installed = false;
+const INSTALL_FLAG = "__openclawTerminalReserveV1";
 let installAbort: AbortController | null = null;
 
 /**
@@ -107,10 +108,10 @@ let installAbort: AbortController | null = null;
  * safe to call from every terminal instance's setup path.
  */
 export function installTerminalKeyboardReserve(): void {
-  if (installed) {
+  // Matches the shipped shim: the flag is claimed BEFORE the touch gate.
+  if (!claimInstallFlag(INSTALL_FLAG)) {
     return;
   }
-  installed = true;
 
   if (!isCoarsePointerDevice()) {
     return;
@@ -207,5 +208,5 @@ export function installTerminalKeyboardReserve(): void {
 export function resetTerminalKeyboardReserveForTests(): void {
   installAbort?.abort();
   installAbort = null;
-  installed = false;
+  releaseInstallFlagForTests(INSTALL_FLAG);
 }

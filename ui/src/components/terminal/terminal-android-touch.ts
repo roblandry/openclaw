@@ -23,6 +23,8 @@
  * missing translation layer.
  */
 
+import { claimInstallFlag, releaseInstallFlagForTests } from "./terminal-shim-install-guard.ts";
+
 const MOVE_TOLERANCE_PX = 10;
 const LONG_PRESS_MS = 500;
 const WHEEL_QUANTUM_PX = 33;
@@ -42,7 +44,7 @@ type Gesture = {
   longPressTimer: ReturnType<typeof setTimeout> | null;
 };
 
-let installed = false;
+const INSTALL_FLAG = "__openclawTerminalTouchFixV6";
 let installAbort: AbortController | null = null;
 
 /**
@@ -50,10 +52,9 @@ let installAbort: AbortController | null = null;
  * Idempotent: safe to call from every terminal instance's setup path.
  */
 export function installTerminalAndroidTouchFix(): void {
-  if (installed) {
+  if (!claimInstallFlag(INSTALL_FLAG)) {
     return;
   }
-  installed = true;
 
   // Production never tears this down (install-once for the page's
   // lifetime, matching the original's `window[FLAG]` contract). The signal
@@ -406,5 +407,5 @@ export function installTerminalAndroidTouchFix(): void {
 export function resetTerminalAndroidTouchFixForTests(): void {
   installAbort?.abort();
   installAbort = null;
-  installed = false;
+  releaseInstallFlagForTests(INSTALL_FLAG);
 }
