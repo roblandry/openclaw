@@ -143,13 +143,14 @@ describe("PDF tool static prepared runtime", () => {
               expect.objectContaining({ provider, id: "middle", api: "openai-completions" }),
               expect.any(Object),
               expect.any(Object),
+              expect.any(Function),
             );
             expect(result.details).toMatchObject({
               model: `${provider}/middle`,
               native: false,
             });
           } finally {
-            lease.release();
+            await lease[Symbol.asyncDispose]();
           }
         },
       );
@@ -255,10 +256,11 @@ describe("PDF tool static prepared runtime", () => {
             expect.objectContaining({ provider: "openai", id: modelId }),
             expect.any(Object),
             expect.any(Object),
+            expect.any(Function),
           );
           expect(result.details).toMatchObject({ model: modelRef, native: false });
         } finally {
-          lease.release();
+          await lease[Symbol.asyncDispose]();
         }
       },
     );

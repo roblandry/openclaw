@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setImmediate } from "node:timers/promises";
 import { afterAll, afterEach, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import * as llmStream from "../../llm/stream.js";
 import type { Model } from "../../llm/types.js";
 import { createAssistantMessageEventStream } from "../../llm/utils/event-stream.js";
 import * as pdfExtract from "../../media/pdf-extract.js";
@@ -29,6 +30,8 @@ import { getSessionMcpRequestSignal } from "../agent-bundle-mcp-request-context.
 import * as modelAuth from "../model-auth.js";
 import * as preparedRuntime from "../prepared-model-runtime.js";
 import { closePreparedModelRuntimeSnapshots } from "../prepared-model-runtime.lifecycle.js";
+import { closeEphemeralPreparedModelRuntimeResources } from "../prepared-model-runtime.resources.js";
+import * as providerStream from "../provider-stream.js";
 import { createPdfTool } from "./pdf-tool.js";
 import { FAKE_PDF_MEDIA } from "./pdf-tool.test-support.js";
 
@@ -233,7 +236,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
               state.finishSetupTail.resolve();
               await outcome;
               await parent.drain();
-              lease.release();
+              await lease[Symbol.asyncDispose]();
               await closePreparedModelRuntimeSnapshots();
             }
           },
@@ -300,6 +303,40 @@ afterEach(async () => {
 });
 afterAll(cleanupPluginLoaderFixturesForTest);
 
+it("does not dispatch a PDF completion retired during transport initialization", async () => {
+  const fixture = nativePdfFixture();
+  await fixture.run(async () => {
+    const dispatch = vi.fn(() => {
+      throw new Error("Unexpected retired PDF provider dispatch");
+    });
+    vi.spyOn(providerStream, "registerProviderStreamForModel").mockImplementationOnce(
+      ({ model, apiRegistry }) => {
+        apiRegistry?.registerApiProvider({
+          api: model.api,
+          stream: dispatch,
+          streamSimple: dispatch,
+        });
+        return undefined;
+      },
+    );
+    const complete = llmStream.complete;
+    let retirement: Promise<void> | undefined;
+    vi.spyOn(llmStream, "complete").mockImplementationOnce((...args) => {
+      const completion = complete(...args);
+      retirement = closeEphemeralPreparedModelRuntimeResources();
+      return completion;
+    });
+
+    expect(await fixture.execute()).toMatchObject({
+      message: expect.stringContaining("Prepared plugin registry resources have been released"),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    await fixture.lease[Symbol.asyncDispose]();
+    await fixture.assertClosed();
+    await retirement;
+  });
+});
+
 it("retains a supplied runtime before the first PDF download awaits", async () => {
   const fixture = nativePdfFixture();
   await fixture.run(async () => {
@@ -313,7 +350,7 @@ it("retains a supplied runtime before the first PDF download awaits", async () =
     try {
       const result = fixture.execute();
       await downloading.promise;
-      fixture.lease.release();
+      await fixture.lease[Symbol.asyncDispose]();
       await setImmediate();
       expect(fixture.state.connections[0]?.database.isOpen).toBe(true);
       finishDownload.resolve();
@@ -343,7 +380,7 @@ it.each(["creation", "result", "late-rejection"] as const)(
       ]);
       abort.abort(new Error("synthetic PDF cancellation"));
       expect(await result).toMatchObject({ message: "synthetic PDF cancellation" });
-      fixture.lease.release();
+      await fixture.lease[Symbol.asyncDispose]();
       await setImmediate();
       expect(fixture.state.connections[0]?.database.isOpen).toBe(true);
       expect(fixture.state.connections[0]?.disposals).toBe(0);
@@ -387,7 +424,7 @@ it.each(["normal", "parent"] as const)(
       await fixture.state.cleanupStarted.promise;
       expect(fixture.state.cancellation.cleanupSignal?.aborted).toBe(true);
       expect(fixture.state.cancellation.registry).toBe(fixture.lease.snapshot.pluginRegistry);
-      fixture.lease.release();
+      await fixture.lease[Symbol.asyncDispose]();
       expect(fixture.state.connections[0]?.database.isOpen).toBe(true);
       fixture.state.finish.resolve();
       expect(await result).toMatchObject({ details: { text: "PDF value 42" } });

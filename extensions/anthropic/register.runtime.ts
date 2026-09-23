@@ -21,12 +21,12 @@ import {
   type ModelCompatConfig,
   modelCostsEqual,
   type ProviderPlugin,
+  requiresClaudeMandatoryAdaptiveThinking,
   resolveClaudeFable5ModelIdentity,
   resolveClaudeModelIdentity,
   resolveClaudeMythos5ModelIdentity,
   resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
-  resolveClaudeThinkingProfile,
   supportsClaude1MContext,
   supportsClaudeAdaptiveThinking,
   supportsClaudeNativeMaxEffort,
@@ -36,15 +36,11 @@ import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coer
 import { buildAnthropicCliBackend } from "./cli-backend.js";
 import {
   CLAUDE_CLI_CANONICAL_DEFAULT_MODEL_REF,
-  CLAUDE_CLI_OFF_THINKING_PROFILE,
   CLAUDE_CLI_PROFILE_ID,
   CLAUDE_MODEL_ID_ALIASES,
 } from "./cli-constants.js";
-import {
-  CLAUDE_CLI_BACKEND_ID,
-  CLAUDE_CLI_DEFAULT_ALLOWLIST_REFS,
-  supportsClaudeDynamicSystemPromptSections,
-} from "./cli-shared.js";
+import { CLAUDE_CLI_BACKEND_ID, CLAUDE_CLI_DEFAULT_ALLOWLIST_REFS } from "./cli-shared.js";
+import { createClaudeCodeVersionProbe } from "./cli-version.js";
 import {
   applyAnthropicConfigDefaults,
   normalizeAnthropicProviderConfigForProvider,
@@ -54,11 +50,16 @@ import { acceptsAnthropicLiveModelContract } from "./live-model-contract-gate.js
 import { anthropicMediaUnderstandingProvider } from "./media-understanding-provider.js";
 import manifest from "./openclaw.plugin.json" with { type: "json" };
 import anthropicProviderDiscovery from "./provider-discovery.js";
+import { resolveThinkingProfile } from "./provider-policy-api.js";
 import {
   createClaudeSessionNodeInvokePolicies,
   registerClaudeSessionDiscovery,
 } from "./session-catalog-registration.js";
-import { isAnthropicOAuthApiKey, wrapAnthropicProviderStream } from "./stream-wrappers.js";
+import {
+  createAnthropicClaudeCodeIdentityWrapper,
+  isAnthropicOAuthApiKey,
+  wrapAnthropicProviderStream,
+} from "./stream-wrappers.js";
 import { fetchAnthropicUsage, resolveAnthropicUsageAuth } from "./usage.js";
 
 // Registration needs descriptors, not auth persistence or external credential discovery.
@@ -82,7 +83,6 @@ function classifyAnthropicFailoverDescriptor(value: string | undefined) {
       return undefined;
   }
 }
-const DEFAULT_ANTHROPIC_MODEL = "anthropic/claude-opus-5";
 const ANTHROPIC_OPUS_48_MODEL_ID = "claude-opus-4-8";
 const ANTHROPIC_OPUS_48_DOT_MODEL_ID = "claude-opus-4.8";
 const ANTHROPIC_OPUS_47_MODEL_ID = "claude-opus-4-7";
@@ -282,7 +282,7 @@ function isAnthropicUnreleasedGenerationModel(modelId: string): boolean {
  * shaping follows without teaching the shared contracts about unknown ids.
  */
 function resolveAnthropicUnreleasedCanonicalModelId(modelId: string): string {
-  return /(?:^|-)claude-sonnet-/.test(modelId) ? "claude-sonnet-5" : "claude-opus-5";
+  return /(?:^|-)claude-sonnet-/.test(modelId) ? "claude-sonnet-5" : "claude-opus-5-5";
 }
 
 // Dynamic rows use the manifest as the provider-owned offline contract when a lifecycle registry
@@ -368,19 +368,6 @@ function buildAnthropicForwardCompatModel(
     ...(unreleasedGeneration
       ? { params: { canonicalModelId: resolveAnthropicUnreleasedCanonicalModelId(lower) } }
       : {}),
-    ...(supportsClaudeNativeXhighEffort({ id: trimmedModelId })
-      ? {
-          thinkingLevelMap: {
-            ...(isAnthropicMandatoryClaude5Model(trimmedModelId)
-              ? { minimal: "low" as const }
-              : {}),
-            xhigh: "xhigh",
-            max: "max",
-          },
-        }
-      : supportsAnthropicNativeMaxEffort(trimmedModelId)
-        ? { thinkingLevelMap: { max: "max" } }
-        : {}),
   };
 }
 
@@ -429,16 +416,11 @@ function isAnthropicGa1MModel(modelId: string): boolean {
   return supportsClaude1MContext({ id: modelId });
 }
 
-function isAnthropicFable5Model(modelId: string): boolean {
-  return resolveClaudeFable5ModelIdentity({ id: modelId }) !== undefined;
-}
-
-function isAnthropicMythos5Model(modelId: string): boolean {
-  return resolveClaudeMythos5ModelIdentity({ id: modelId }) !== undefined;
-}
-
 function isAnthropicMandatoryClaude5Model(modelId: string): boolean {
-  return isAnthropicFable5Model(modelId) || isAnthropicMythos5Model(modelId);
+  return (
+    resolveClaudeFable5ModelIdentity({ id: modelId }) !== undefined ||
+    resolveClaudeMythos5ModelIdentity({ id: modelId }) !== undefined
+  );
 }
 
 function isAnthropicSonnet5Model(modelId: string): boolean {
@@ -567,7 +549,11 @@ function applyAnthropicModernMaxTokens(params: {
   modelId: string;
   model: ProviderRuntimeModel;
 }): ProviderRuntimeModel | undefined {
-  if (!isAnthropic128kOutputModel(params.modelId)) {
+  // Catalog defaults must not raise an operator-configured output cap.
+  if (
+    params.model.maxTokensSource === "configured" ||
+    !isAnthropic128kOutputModel(params.modelId)
+  ) {
     return undefined;
   }
   if ((params.model.maxTokens ?? 0) >= ANTHROPIC_MODERN_MAX_OUTPUT_TOKENS) {
@@ -583,7 +569,7 @@ function applyAnthropicThinkingLevelMap(params: {
   modelId: string;
   model: ProviderRuntimeModel;
 }): ProviderRuntimeModel | undefined {
-  const mandatoryClaude5 = isAnthropicMandatoryClaude5Model(params.modelId);
+  const mandatoryClaude5 = requiresClaudeMandatoryAdaptiveThinking({ id: params.modelId });
   const nativeXhigh = mandatoryClaude5 || supportsClaudeNativeXhighEffort({ id: params.modelId });
   if (!supportsAnthropicNativeMaxEffort(params.modelId)) {
     return undefined;
@@ -723,7 +709,7 @@ function normalizeAnthropicResolvedModel(
 /** Build the full Anthropic provider descriptor used by runtime registration. */
 export function buildAnthropicProvider(): ProviderPlugin {
   const providerId = "anthropic";
-  const defaultAnthropicModel = DEFAULT_ANTHROPIC_MODEL;
+  const defaultAnthropicModel = CLAUDE_CLI_CANONICAL_DEFAULT_MODEL_REF;
   return {
     id: providerId,
     label: "Anthropic",
@@ -862,17 +848,7 @@ export function buildAnthropicProvider(): ProviderPlugin {
     resolveReasoningOutputMode: () => "native",
     classifyFailoverReason: ({ code, errorType }) =>
       classifyAnthropicFailoverDescriptor(errorType) ?? classifyAnthropicFailoverDescriptor(code),
-    resolveThinkingProfile: ({ provider, modelId, params }) => {
-      const contractModelId = resolveClaudeModelIdentity({ id: modelId, params });
-      return isAnthropicMythos5Model(contractModelId) &&
-        normalizeLowercaseStringOrEmpty(provider) !== PROVIDER_ID
-        ? CLAUDE_CLI_OFF_THINKING_PROFILE
-        : resolveClaudeThinkingProfile(contractModelId, undefined, {
-            includeNativeMax: [PROVIDER_ID, CLAUDE_CLI_BACKEND_ID].includes(
-              normalizeLowercaseStringOrEmpty(provider),
-            ),
-          });
-    },
+    resolveThinkingProfile,
     wrapStreamFn: wrapAnthropicProviderStream,
     resolveFastModeSupport,
     resolveUsageAuth: resolveAnthropicUsageAuth,
@@ -889,29 +865,18 @@ export function buildAnthropicProvider(): ProviderPlugin {
 
 /** Register Anthropic provider, Claude CLI backend, and media understanding provider. */
 export function registerAnthropicPlugin(api: OpenClawPluginApi): void {
-  let supportsDynamicSystemPromptSections = false;
-  // Catalog discovery must not materialize the runtime for a CLI-only capability probe.
-  // First CLI executions share and await it before resolving immutable process argv.
-  const ensureDynamicSystemPromptSectionsSupport = createLazyRuntimeModule(async () => {
-    try {
-      const result = await api.runtime.system.runCommandWithTimeout(["claude", "--version"], {
-        timeoutMs: 1_500,
-        killProcessTree: true,
-        maxOutputBytes: { stdout: 1_024, stderr: 1_024 },
-      });
-      supportsDynamicSystemPromptSections =
-        result?.code === 0 && supportsClaudeDynamicSystemPromptSections(result.stdout);
-    } catch {
-      supportsDynamicSystemPromptSections = false;
-    }
+  const version = createClaudeCodeVersionProbe(api);
+  api.registerCliBackend(buildAnthropicCliBackend(version));
+  api.registerProvider({
+    ...buildAnthropicProvider(),
+    wrapStreamFn: (ctx) =>
+      createAnthropicClaudeCodeIdentityWrapper(
+        wrapAnthropicProviderStream(ctx),
+        version.resolveVersion,
+      ),
+    wrapSimpleCompletionStreamFn: (ctx) =>
+      createAnthropicClaudeCodeIdentityWrapper(ctx.streamFn, version.resolveVersion, ctx.sourceApi),
   });
-  api.registerCliBackend(
-    buildAnthropicCliBackend({
-      ensureDynamicSystemPromptSectionsSupport,
-      supportsDynamicSystemPromptSections: () => supportsDynamicSystemPromptSections,
-    }),
-  );
-  api.registerProvider(buildAnthropicProvider());
   api.registerMediaUnderstandingProvider(anthropicMediaUnderstandingProvider);
   registerClaudeSessionDiscovery(api);
   for (const policy of createClaudeSessionNodeInvokePolicies()) {

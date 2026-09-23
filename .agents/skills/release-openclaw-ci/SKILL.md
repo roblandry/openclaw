@@ -89,7 +89,11 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   workflow path, ref, Tooling SHA, dispatch title, event, target, candidate, and
   validation inputs remain exact. Newer child attempts replace matching jobs;
   jobs absent from a newer attempt carry forward. A duplicate job identity,
-  missing attempt, regressed attempt, or changed tuple fails closed.
+  missing attempt, regressed attempt, or changed tuple fails closed. `frv status`
+  and `continue` allow up to 60 seconds of read-only reconciliation when GitHub
+  temporarily returns duplicate jobs in the newest retry attempt. The run tuple
+  and attempt stay pinned; persistent duplicates and older-attempt conflicts
+  remain errors.
 - Use `pnpm frv status|continue --failed|verify` for attempt-aware recovery.
   The controller is stateless: the immutable execution plan, exact GitHub run
   attempts, Diagnostic Drain, and final manifest are the only authorities. It
@@ -118,7 +122,9 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   and serve as Release SHA. One successful fresh full parent may qualify both
   roles and their exact publication bytes. If notes change afterward, a later
   Release SHA may reuse product evidence only when its complete delta from
-  Code SHA is exactly `CHANGELOG.md`; its changed bytes still need qualification.
+  Code SHA changes the selected `CHANGELOG/YYYY.M.PATCH.md` and optionally
+  `CHANGELOG.md` and `CHANGELOG/records/YYYY.M.PATCH.md`, with no other paths,
+  renames, or deletions; its changed bytes still need qualification.
 - Extended-stable validates one exact branch tip; it does not reuse the regular
   Code-SHA/Release-SHA evidence model.
 - In a sparse worktree or Testbox source sync, first confirm `package.json`,
@@ -227,9 +233,14 @@ until their dependent enforcement changes land.
 
 Before full matrix dispatch, run both `pnpm ui:i18n:check` and
 `pnpm native:i18n:check` against the frozen trusted target in approved isolation.
-Bind both results to that exact SHA; either generated-locale drift blocks
-dispatch. Keep target execution outside the trusted dispatch helper—do not
-execute an arbitrary target checkout as helper code.
+Bind both results to that exact SHA. Report generated-locale drift as a warning
+and continue dispatch; source changes and the serialized locale-refresh workflows
+can temporarily leave generated output behind. Do not require regeneration before
+starting validation. FRV's normal-CI child retains the strict `control-ui-i18n`
+and `native-i18n` jobs and reports their actual results in the run summary;
+a failed locale job still fails validation. PR-side checks and release-prep and
+publication gates stay unchanged. Keep target execution outside the trusted
+dispatch helper—do not execute an arbitrary target checkout as helper code.
 
 Before expensive full validation, also run `pnpm ui:build` on the same frozen
 trusted target with its frozen dependencies in approved isolation, outside the
@@ -267,6 +278,28 @@ ambient env only when it was already intentionally injected for this release.
 The script prints only provider status and HTTP class, never tokens.
 The Anthropic check performs a tiny message completion so exhausted or
 non-billable credentials fail before the expensive release matrix.
+
+### Before publication
+
+For regular beta/stable protected publication, after evidence validation run
+`pnpm release:publish-preflight` with the intended tag, exact Full Release
+Validation run and attempt, npm dist-tag, plugin scope, approved soak waiver when
+applicable, and protected publication tooling ref. `pnpm release:candidate`
+invokes this check with its downloaded manifests; do not redownload them or
+replace the selected attempt. Use the report's exact dispatch command for the
+chosen publication route only after resolving every `FAIL` and owner-action
+`WARN`. Alpha uses its matching Tideclaw branch; extended-stable retains its
+separate owner workflows and is not admitted by this preflight.
+
+Check the report before retrying a failed publication: preserve the verified
+`openclaw_npm_resume_run_id` for already-published core bytes, inspect matching
+draft/published release state, and identify exact orphaned plugin/ClawHub children
+before cancellation. Preflight is read-only and does not authorize publication,
+cancel children, or prove a repository secret from local credentials. Bootstrap
+candidates need a read-only `npm whoami` probe using the repository's actual
+`NPM_TOKEN`; follow the secret-isolated step in
+[Release policy](https://docs.openclaw.ai/reference/RELEASING#probe-the-bootstrap-token)
+and retain its run URL. Do not rotate credentials as part of a diagnostic check.
 
 ## Dispatch
 
@@ -310,11 +343,21 @@ Prefer an immutable trusted-main workflow revision, target the exact Code SHA:
 
 ```bash
 TOOLING_SHA="<exact-main-ancestor-sha>"
+PUBLICATION_SELECTION='{"route":"normal","npmDistTag":"latest","publishOpenclawNpm":true,"pluginPublishScope":"all-publishable","plugins":[]}'
 node scripts/full-release-validation-at-sha.mjs \
   --sha <code-sha> \
   --target-ref release/YYYY.M.PATCH \
-  --workflow-sha "$TOOLING_SHA"
+  --workflow-sha "$TOOLING_SHA" \
+  -f validation_purpose=publish \
+  -f publication_selection_json="$PUBLICATION_SELECTION"
 ```
+
+Select `npmDistTag=beta` for beta publication and `route=prepared` only for an
+intended prepared-button consumer. The source-admission result does not qualify
+registry state or authorize publishing. Nonpublish investigations use explicit
+`validation_purpose=diagnostic` without publication selection; recurring main
+qualification uses `main-qualification`, and exact published-package confidence
+uses `postpublish-confidence`. Keep coverage/profile selection independent.
 
 For regular `release/*` validation, never raw-dispatch the workflow without
 `target_context_ref` (the helper's `--target-ref` records it). Canonical
@@ -337,7 +380,8 @@ current release-isolation contract; older workflow revisions fail closed.
 
 For immutable workflow proof on a moving `main`, use
 `pnpm ci:full-release --sha <code-sha> --target-ref
-release/YYYY.M.PATCH --workflow-sha <tooling-sha>`. Its canonical `release-ci/*` ref keeps evidence reuse
+release/YYYY.M.PATCH --workflow-sha <tooling-sha> -f validation_purpose=publish
+-f publication_selection_json="$PUBLICATION_SELECTION"`. Its canonical `release-ci/*` ref keeps evidence reuse
 enabled after proving the workflow commit is still on trusted `main` lineage.
 Pass `-f reuse_evidence=false` only when the operator intentionally needs a
 fresh full run.
@@ -347,10 +391,16 @@ that Code SHA as Release SHA and use the same successful parent/attempt and
 its exact prepared bytes for candidate and publication checks. Required gates,
 final channel-specific SDK review and acknowledgement still apply.
 
-Only if notes change after qualification, commit exactly `CHANGELOG.md` and
+Only if notes change after qualification, commit the selected release entry and
+any matching record/index updates, then
 optionally run the helper against the new Release SHA with reuse. That parent must report
-`policy=changelog-only-release-v1`, `evidenceSha=<code-sha>`, and
-`changedPaths=["CHANGELOG.md"]`; it should reuse the product matrix instead of
+`policy=split-changelog-release-v1`, `evidenceSha=<code-sha>`, and the complete
+`changedPaths`: the selected `CHANGELOG/YYYY.M.PATCH.md` is required, with only
+`CHANGELOG.md` and `CHANGELOG/records/YYYY.M.PATCH.md` permitted alongside it.
+Entry/record additions or modifications are permitted; index changes must be
+modifications. Renames, deletions, other releases, and docs source edits require
+fresh product qualification. Historical root-only receipts retain
+`changelog-only-release-v1`. The split path should reuse the product matrix instead of
 dispatching child lanes. Npm preflight and package/install acceptance still run
 against the exact Release SHA and its new tarball bytes.
 
@@ -361,8 +411,12 @@ recovering historical separate evidence. Regular final qualification records
 SDK reports for both `beta` and `latest`; review the acknowledgement for the
 actual publication channel. Prepared descriptors live in `publicationArtifacts` in
 the exact final manifest. Product evidence reuse never substitutes Code-SHA
-package or image bytes for the final Release SHA. A parent that produced these
-artifacts needs a fresh all-group FRV instead of same-parent continuation.
+package or image bytes for the final Release SHA. For failed independent npm qualification, use `pnpm frv continue --failed`:
+failed npm jobs retry on their original run, successful preparation jobs
+and diagnostic children carry forward, and the parent verifies the resulting
+receipts. Failure alone is not a continuation rejection. Frozen workflows
+execute their original receipt logic; a local controller upgrade does not
+retrofit that logic, and final verification still owns the recovery result.
 
 The SHA-pinned helper infers `beta` for matching beta release candidates and
 exact alpha tags, and `stable` for stable/correction versions, then passes the
@@ -377,6 +431,9 @@ focused fixes; never widen automatically.
 Publish with `openclaw-release-publish.yml` using `release_profile=from-validation`
 unless a maintainer intentionally wants to cross-check a specific profile; the
 publish workflow reads the effective profile from the full-validation manifest.
+Stable publication requires soak unless the operator supplies `stable_soak_waiver`
+with a reason; the publisher forwards and records that reason in release evidence
+without changing validation coverage or other publication gates.
 
 ### Extended-stable validation
 
@@ -402,6 +459,8 @@ pnpm ci:full-release \
   --sha "$VALIDATION_SHA" \
   --target-ref "$CONTEXT_REF" \
   --workflow-sha "$TOOLING_SHA" \
+  -f validation_purpose=publish \
+  -f publication_selection_json='{"route":"extended-stable","npmDistTag":"extended-stable","publishOpenclawNpm":true,"pluginPublishScope":"all-publishable","plugins":[]}' \
   -f release_profile=stable \
   -f run_release_soak=true \
   -f fail_fast=false \
@@ -465,6 +524,25 @@ the smallest behavior-preserving repair. Provider, approval, runner, or log
 races keep the candidate unchanged. Record repairs and superseded runs; any
 branch change requires a new complete parent. Omit only an explicitly
 unsupported frozen-target scenario, never a required behavior or package.
+
+### Frozen-target test omissions
+
+Use `plugin_prerelease_node_exclude_patterns_json` only for exact `src/plugins/`
+test paths in the Plugin Prerelease Node lane. Use
+`extension_test_exclude_patterns_json` for exact `extensions/` test paths in
+Plugin Prerelease extension shards. Normal CI does not own that sweep. Both
+default to `[]`; there is no implicit
+Codex omission. Pass JSON arrays at initial dispatch, retain the justification
+and owning fix, and report omitted coverage as not run.
+
+Preflight must discover every requested path in the selected frozen-target
+lane; nonexistent, out-of-lane, duplicate, basename, or glob inputs fail loudly.
+Trusted tooling applies exact exclusions to inline Vitest leaves while
+preserving candidate runtime preparation and restores original config bytes
+after the shard command. Do not substitute CLI `--exclude` or a new target-side
+environment variable: frozen inline projects may ignore them. Inputs remain in
+the immutable request, coverage/reuse identity, and final manifest; changing
+them requires a new request, never continuation.
 
 ## Watch
 
@@ -542,7 +620,8 @@ run-ID-cached bytes first.
      prerequisite, and retry only the failed surface
    - wrapper/monitor failure: keep the child and candidate identities; record
      the wrapper result separately from the child result
-   - changelog/release-note failure: change only `CHANGELOG.md`, keep Code SHA
+   - changelog/release-note failure: change only the selected release entry and
+     permitted record/index paths under `split-changelog-release-v1`, keep Code SHA
      evidence, and repeat Release SHA proof
    - publish child/registry selector failure: keep Release SHA and resume the
      failed child; never rebuild an immutable version that already published
