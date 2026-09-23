@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyLatches,
   installTerminalKeyRow,
@@ -86,9 +86,24 @@ describe("applyLatches", () => {
 });
 
 describe("installTerminalKeyRow", () => {
+  beforeEach(() => {
+    // This repo's vitest pool runs with isolate:false, so a predecessor
+    // test FILE's leftover module/window state (e.g. another suite calling
+    // createIsolatedGhosttyTerminal, which installs this shim as a side
+    // effect) could otherwise make the "install-once" and "non-touch
+    // no-ops" guards below pass or fail based on run order instead of on
+    // what this suite itself does.
+    resetTerminalKeyRowForTests();
+  });
+
   afterEach(() => {
     resetTerminalKeyRowForTests();
     document.body.innerHTML = "";
+    // These tests mutate the real global navigator/window; an un-reset
+    // stub here would leak into whichever unrelated test file runs next in
+    // the same worker.
+    Object.defineProperty(navigator, "maxTouchPoints", { value: 0, configurable: true });
+    delete (window as unknown as Record<string, unknown>).matchMedia;
   });
 
   it("no-ops on a non-touch device: no overlay is inserted", () => {
@@ -304,5 +319,106 @@ describe("installTerminalKeyRow", () => {
     installTerminalKeyRow();
     installTerminalKeyRow();
     expect(document.querySelectorAll("#openclaw-terminal-key-row").length).toBe(1);
+  });
+
+  it("uses the same window flag name as the shipped shim, so a coexisting legacy copy would defer to it", () => {
+    setCoarsePointer(true);
+    buildGhosttyHost();
+    installTerminalKeyRow();
+    // oxlint-disable-next-line no-underscore-dangle -- asserting the shipped shim's literal flag name, not a naming choice here
+    expect((window as unknown as Record<string, unknown>).__openclawTerminalKeyRowV4).toBe(true);
+  });
+
+  it("a call on a non-touch device does not consume the once-only install: a later touch-capable call still installs", () => {
+    // Matches the shipped shim's exact ordering (flag checked before the
+    // gate, but only SET after it passes): a hybrid/convertible device that
+    // starts non-touch and later reports a coarse pointer can still get the
+    // row on a subsequent terminal-instance setup call.
+    setCoarsePointer(false);
+    installTerminalKeyRow();
+    expect(document.getElementById("openclaw-terminal-key-row")).toBeNull();
+
+    setCoarsePointer(true);
+    buildGhosttyHost();
+    installTerminalKeyRow();
+    expect(document.getElementById("openclaw-terminal-key-row")).not.toBeNull();
+  });
+
+  it("renders the full key matrix: all 16 keys across both rows, in the shipped layout order", () => {
+    setCoarsePointer(true);
+    buildGhosttyHost();
+    installTerminalKeyRow();
+
+    const rows = overlay().shadowRoot?.querySelectorAll(".row");
+    expect(rows).toHaveLength(2);
+    const labels = (row: Element) =>
+      Array.from(row.querySelectorAll("button")).map((b) => b.textContent);
+    expect(labels(rows![0]!)).toEqual(["ESC", "/", "|", "-", "↑", "HOME", "PGUP", "END"]);
+    expect(labels(rows![1]!)).toEqual(["TAB", "CTRL", "ALT", "←", "↓", "→", "PGDN", "⌨"]);
+  });
+
+  it("HOME/END/PGUP/PGDN send their literal CSI sequences when ghostty does not acknowledge the keydown", () => {
+    setCoarsePointer(true);
+    const { container, textarea } = buildGhosttyHost();
+    installTerminalKeyRow();
+    textarea.focus();
+
+    const written: string[] = [];
+    container.addEventListener("compositionend", (e) => written.push((e as CompositionEvent).data));
+    const buttons = Array.from(overlay().shadowRoot?.querySelectorAll("button") ?? []);
+    const click = (label: string) => buttons.find((b) => b.textContent === label)?.click();
+
+    click("HOME");
+    click("END");
+    click("PGUP");
+    click("PGDN");
+
+    // Each is preceded by the endComposition() reset ("") before its
+    // literal-fallback write, exactly like the ARROW fallback case.
+    expect(written).toEqual(["", "\x1b[H", "", "\x1b[F", "", "\x1b[5~", "", "\x1b[6~"]);
+  });
+
+  it("Alt arms on tap and ESC-prefixes the next forwarded character", () => {
+    setCoarsePointer(true);
+    const { container, textarea } = buildGhosttyHost();
+    installTerminalKeyRow();
+    textarea.focus();
+
+    const altButton = Array.from(overlay().shadowRoot?.querySelectorAll("button") ?? []).find(
+      (b) => b.textContent === "ALT",
+    ) as HTMLButtonElement;
+    altButton.click();
+    expect(altButton.getAttribute("data-on")).toBe("1");
+
+    const written: string[] = [];
+    container.addEventListener("compositionend", (e) => written.push((e as CompositionEvent).data));
+    container.dispatchEvent(
+      new CompositionEvent("compositionend", { data: "x", bubbles: false, cancelable: false }),
+    );
+
+    expect(written).toEqual(["\x1bx"]);
+    expect(altButton.getAttribute("data-on")).toBe("0");
+  });
+
+  it("zero-diff invariant holds across focus, a latch tap, a key send, and dismissal -- not just at install", () => {
+    setCoarsePointer(true);
+    const { host, container, textarea } = buildGhosttyHost();
+    installTerminalKeyRow();
+    const hostBefore = snapshotStyleAndAttrs(host);
+    const containerBefore = snapshotStyleAndAttrs(container);
+
+    textarea.focus();
+    const ctrlButton = Array.from(overlay().shadowRoot?.querySelectorAll("button") ?? []).find(
+      (b) => b.textContent === "CTRL",
+    ) as HTMLButtonElement;
+    ctrlButton.click();
+    overlay().shadowRoot?.querySelector<HTMLButtonElement>("button")?.click(); // ESC, consumes the latch
+    const dismissButton = Array.from(overlay().shadowRoot?.querySelectorAll("button") ?? []).find(
+      (b) => b.textContent === "⌨",
+    ) as HTMLButtonElement;
+    dismissButton.click();
+
+    expect(snapshotStyleAndAttrs(host)).toEqual(hostBefore);
+    expect(snapshotStyleAndAttrs(container)).toEqual(containerBefore);
   });
 });

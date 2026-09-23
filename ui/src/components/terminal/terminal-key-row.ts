@@ -38,6 +38,11 @@
  */
 
 import { isCoarsePointerDevice } from "./terminal-coarse-pointer.ts";
+import {
+  isInstallFlagSet,
+  releaseInstallFlagForTests,
+  setInstallFlag,
+} from "./terminal-shim-install-guard.ts";
 
 const ESC = "\x1b";
 
@@ -167,7 +172,7 @@ export const KEY_ROW_ROWS: readonly KeyDef[][] = [
   ],
 ];
 
-let installed = false;
+const INSTALL_FLAG = "__openclawTerminalKeyRowV4";
 let installAbort: AbortController | null = null;
 
 /**
@@ -175,17 +180,25 @@ let installAbort: AbortController | null = null;
  * call from every terminal instance's setup path.
  */
 export function installTerminalKeyRow(): void {
-  if (installed) {
+  if (isInstallFlagSet(INSTALL_FLAG)) {
     return;
   }
-  installed = true;
 
   // Same scoping rule as the touch fixes: this is a soft-keyboard
   // accessory. On a device with a real keyboard it is redundant and would
   // only cover terminal rows.
+  //
+  // Unlike the sibling IME/reserve shims (which latch the flag BEFORE this
+  // gate), the shipped key-row shim latches its flag AFTER: a call on a
+  // non-touch device does not consume the once-only install, so a later
+  // call on a hybrid/convertible device that has since reported a coarse
+  // pointer can still install it. Preserve that exact ordering -- do not
+  // merge this into the shared claimInstallFlag() used by the sibling
+  // shims, which checks and sets atomically.
   if (!isCoarsePointerDevice()) {
     return;
   }
+  setInstallFlag(INSTALL_FLAG);
 
   // Production never tears this down (install-once for the page's
   // lifetime, matching the original's `window[FLAG]` contract). The signal
@@ -583,5 +596,5 @@ export function installTerminalKeyRow(): void {
 export function resetTerminalKeyRowForTests(): void {
   installAbort?.abort();
   installAbort = null;
-  installed = false;
+  releaseInstallFlagForTests(INSTALL_FLAG);
 }
