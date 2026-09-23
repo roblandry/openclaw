@@ -1,5 +1,6 @@
 import type { CreateGhosttyTerminalOptions } from "@openclaw/libterminal/browser";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { installTerminalKeyRow } from "./terminal-key-row.ts";
 
 function isEventListener(value: unknown): value is EventListener {
   return typeof value === "function";
@@ -7,6 +8,11 @@ function isEventListener(value: unknown): value is EventListener {
 
 /** Creates a terminal whose WASM memory is never reused by another tab. */
 export async function createIsolatedGhosttyTerminal(options: CreateGhosttyTerminalOptions) {
+  // On-screen Esc/Tab/Ctrl/Alt/arrow/Home/End/PgUp/PgDn key row for touch
+  // devices, whose soft keyboards have none of them. Installs document-level
+  // listeners exactly once per page, so calling it from every terminal
+  // instance's setup path is safe. See terminal-key-row.ts.
+  installTerminalKeyRow();
   const [{ createGhosttyTerminal, loadGhosttyRuntime }, ghosttyModule] = await Promise.all([
     import("@openclaw/libterminal/browser"),
     import("ghostty-web"),
